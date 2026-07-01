@@ -60,21 +60,78 @@ def break_even_utilization(discount_frac: float) -> float:
     return max(0.0, min(1.0, 1.0 - discount_frac))
 
 
-def recommend_tier(hours_per_day: float, interruptible: bool, reserved_discount: float = 0.45) -> str:
+GPU_INTERRUPT_RATE = {
+    # Illustrative per-hour spot reclaim probability by GPU type — bigger/newer
+    # neocloud SKUs (H100/H200) are reclaimed less often than commodity A10G/L4.
+    "H100": 0.03, "H200": 0.03, "A100": 0.05, "A10G": 0.08, "L4": 0.08,
+}
+
+
+def recommend_tier(
+    hours_per_day: float,
+    interruptible: bool,
+    reserved_discount: float = 0.45,
+    gpu_type: str | None = None,
+    job_days: float | None = None,
+    reserved_1yr_discount: float = 0.30,
+) -> str:
     """Pick a purchasing tier from a workload's duty cycle + interruptibility.
 
-    DOCUMENTED simple policy (instructor extension point — swap in your own):
+    BASE policy (unchanged when gpu_type/job_days are omitted, kept for backward
+    compatibility with existing callers/tests):
       - interruptible & not 24/7  -> 'spot'      (checkpoint and ride the discount)
       - duty cycle >= break-even  -> 'reserved'  (steady, high utilization)
       - otherwise                 -> 'on_demand' (spiky / low duty)
+
+    EXTENDED policy (opt-in via gpu_type/job_days — "Your Turn" Extension 1):
+      - a high spot-reclaim GPU type (rate > 6%/h) running near-continuously is
+        cheaper on a 1yr reserved commitment than eating repeated checkpoint rework
+      - among workloads clearing the reserved break-even, only ones running on
+        most days of the month (job_days >= 25) are persistent enough to justify
+        the deeper, riskier 3yr commitment; shorter-duration jobs get 1yr instead
     """
     duty = max(0.0, hours_per_day) / 24.0
-    be = break_even_utilization(reserved_discount)
+    be_3yr = break_even_utilization(reserved_discount)
+    be_1yr = break_even_utilization(reserved_1yr_discount)
+    interrupt_rate = GPU_INTERRUPT_RATE.get(gpu_type, 0.05) if gpu_type else 0.05
+
     if interruptible and hours_per_day < 24:
-        return "spot"
-    if duty >= be:
-        return "reserved"
+        if interrupt_rate <= 0.06 or duty < be_1yr:
+            return "spot"
+        # Frequent reclaims + near-continuous duty: repeated checkpoint rework
+        # outweighs the spot discount, so a 1yr commitment is the safer bet.
+        return "reserved_1yr" if job_days is not None else "reserved"
+
+    if duty >= be_3yr:
+        if job_days is None:
+            return "reserved"
+        if job_days >= 25:
+            return "reserved_3yr"
+        if duty >= be_1yr:
+            return "reserved_1yr"
+        return "on_demand"
+
+    if job_days is not None and duty >= be_1yr:
+        return "reserved_1yr"
     return "on_demand"
+
+
+def cache_is_worth_it(avg_cache_reads: float, write_cost_per_m: float, read_discount: float = 0.10) -> bool:
+    """True when repeated cache reads save more than the write premium costs.
+
+    Expressed in $/M-token units relative to one uncached read = 1.0: writing the
+    cache costs write_cost_per_m once, then each read costs read_discount instead
+    of 1.0 (the -90% cache-read discount). Break-even reads to recoup the write:
+    avg_cache_reads * (1 - read_discount) > write_cost_per_m.
+    """
+    savings_per_read = 1.0 - read_discount
+    return avg_cache_reads * savings_per_read > write_cost_per_m
+
+
+def break_even_cache_reads(write_cost_per_m: float, read_discount: float = 0.10) -> float:
+    """Minimum avg reads of a cached prefix needed before caching pays for itself."""
+    savings_per_read = 1.0 - read_discount
+    return write_cost_per_m / savings_per_read if savings_per_read > 0 else float("inf")
 
 
 def spot_checkpoint_cost(

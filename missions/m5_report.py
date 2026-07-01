@@ -52,7 +52,20 @@ def run(verbose: bool = True) -> dict:
         "best_region": min(sustainability.REGION_CARBON, key=sustainability.REGION_CARBON.get),
     }
 
-    md = report.build_report(baseline, optimized, levers, sustainability=sust)
+    ext4 = r2.get("extension4", {})
+    extra = "\n".join([
+        "## Reasoning budget (Your Turn Extension 4)",
+        "",
+        f"- Reasoning traffic: {ext4.get('n_reasoning', 0)}/{ext4.get('n_total', 0)} requests "
+        f"({ext4.get('reasoning_share_traffic_pct', 0)}% of traffic, "
+        f"{ext4.get('reasoning_share_cost_pct', 0)}% of inference spend)",
+        f"- Energy: {ext4.get('wh_reasoning', 0):,.1f} Wh/day (reasoning) vs "
+        f"{ext4.get('wh_normal', 0):,.1f} Wh/day (normal)",
+        f"- Routing rule (cap reasoning at 5% of traffic): save "
+        f"${ext4.get('capped_cost_saved', 0):,.2f}/day and {ext4.get('capped_wh_saved', 0):,.1f} Wh/day",
+    ])
+
+    md = report.build_report(baseline, optimized, levers, sustainability=sust, extra_sections=extra)
     out_md = os.path.join(ROOT, "outputs", "report.md")
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
     with open(out_md, "w") as f:
