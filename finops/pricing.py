@@ -102,3 +102,51 @@ def spot_checkpoint_cost(
         "on_demand_cost": round(on_demand_cost, 2),
         "savings_pct": round(savings_pct, 1),
     }
+
+
+def cache_break_even_reads(read_discount: float = 0.10) -> float:
+    """Minimum avg reads-per-cached-prefix needed for caching to pay for itself.
+
+    Derived from cache_is_worth_it()'s break-even (see there for the model):
+    avg_cache_reads > 1 / (1 - read_discount).
+    """
+    if read_discount >= 1.0:
+        return float("inf")
+    return 1.0 / (1.0 - read_discount)
+
+
+def cache_is_worth_it(
+    avg_cache_reads: float,
+    write_cost_per_m: float,
+    read_discount: float = 0.10,   # 10% = 90% off, e.g. Anthropic/Gemini cached-read
+) -> bool:
+    """Is it worth writing a prefix into the prompt cache, given how often it's re-read?
+
+    Extension 3 (Your Turn #3, Guide.md §10): "Prompt caching chỉ có lợi khi tỷ lệ
+    read đủ cao." Model (June-2026 pricing shape):
+      - Writing a prefix into cache costs `write_cost_per_m` $/1M tokens — the same
+        rate as one normal (uncached) request. The write itself saves nothing; it's
+        an up-front bet that pays off only if the prefix gets re-read.
+      - Every cached READ of that prefix (including via a *different* later request)
+        is billed at `read_discount` x the normal rate (0.10 = 90% off, matching
+        `finops.pricing.request_cost`'s default `cache_discount`).
+      - Without caching, you'd instead pay the full normal rate on EVERY one of
+        those `avg_cache_reads` occurrences (there is no separate "first request"
+        discount — the write itself already covers occurrence #1).
+
+    Break-even: total cost with cache < total cost without cache
+        write_cost_per_m + avg_cache_reads * write_cost_per_m * read_discount
+            < avg_cache_reads * write_cost_per_m
+        =>  avg_cache_reads > 1 / (1 - read_discount)     (see cache_break_even_reads)
+
+    Note the write rate cancels out algebraically — the break-even READ COUNT only
+    depends on the discount, not the price level. We still compute both totals
+    explicitly (rather than just comparing to the algebraic threshold) so the
+    function keeps working if a future model prices writes at a premium instead of
+    the normal rate (pass `write_cost_per_m` already inflated to represent that).
+    """
+    if avg_cache_reads <= 0 or write_cost_per_m <= 0:
+        return False
+    without_cache = avg_cache_reads * write_cost_per_m
+    with_cache = write_cost_per_m + avg_cache_reads * write_cost_per_m * read_discount
+    return with_cache < without_cache

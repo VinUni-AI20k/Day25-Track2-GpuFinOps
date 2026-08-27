@@ -32,3 +32,15 @@ def test_spot_checkpoint_saves():
     res = pricing.spot_checkpoint_cost(100, 1.5, 2.5)
     assert res["spot_cost"] < res["on_demand_cost"]
     assert res["savings_pct"] > 0
+
+
+def test_cache_is_worth_it():
+    # default read_discount=0.10 -> break-even at 1/(1-0.10) = 1.111... reads
+    assert abs(pricing.cache_break_even_reads(0.10) - 1.0 / 0.9) < 1e-9
+    # a prefix read only once never earns back the write
+    assert pricing.cache_is_worth_it(avg_cache_reads=1, write_cost_per_m=3.0) is False
+    # read many times -> clearly worth it
+    assert pricing.cache_is_worth_it(avg_cache_reads=10, write_cost_per_m=3.0) is True
+    # a shallower discount raises the bar (need more reads to break even)
+    assert pricing.cache_is_worth_it(avg_cache_reads=2, write_cost_per_m=3.0, read_discount=0.60) is False
+    assert pricing.cache_is_worth_it(avg_cache_reads=2, write_cost_per_m=3.0, read_discount=0.10) is True
